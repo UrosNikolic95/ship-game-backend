@@ -10,7 +10,7 @@ interface MoveDto {
 interface TradeDto {
   portId: string;
   resource: Resource;
-  qty: number;
+  quantity: number;
   action: 'buy' | 'sell';
 }
 
@@ -30,7 +30,7 @@ export class GameController {
 
   @Post('trade')
   trade(@Body() body: TradeDto): GameState {
-    return this.game.trade(body.portId, body.resource, body.qty, body.action);
+    return this.game.trade(body.portId, body.resource, body.quantity, body.action);
   }
 
   @Post('reset')

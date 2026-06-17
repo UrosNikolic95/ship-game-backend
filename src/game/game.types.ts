@@ -27,7 +27,7 @@ export interface Port {
 // player how much they have invested and their average unit cost per good.
 export interface PurchaseStats {
   totalSpent: number;
-  perResource: Record<Resource, { spent: number; qty: number }>;
+  perResource: Record<Resource, { spent: number; quantity: number }>;
 }
 
 export interface GameState {
@@ -62,11 +62,11 @@ export function emptyPurchases(): PurchaseStats {
   return {
     totalSpent: 0,
     perResource: {
-      wood: { spent: 0, qty: 0 },
-      grain: { spent: 0, qty: 0 },
-      iron: { spent: 0, qty: 0 },
-      spice: { spent: 0, qty: 0 },
-      cloth: { spent: 0, qty: 0 },
+      wood: { spent: 0, quantity: 0 },
+      grain: { spent: 0, quantity: 0 },
+      iron: { spent: 0, quantity: 0 },
+      spice: { spent: 0, quantity: 0 },
+      cloth: { spent: 0, quantity: 0 },
     },
   };
 }

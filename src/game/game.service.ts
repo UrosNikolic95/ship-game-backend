@@ -42,13 +42,13 @@ export class GameService {
   trade(
     portId: string,
     resource: Resource,
-    qty: number,
+    quantity: number,
     action: 'buy' | 'sell',
   ): GameState {
     if (!RESOURCES.includes(resource)) {
       throw new BadRequestException(`Unknown resource: ${resource}`);
     }
-    if (!Number.isInteger(qty) || qty <= 0) {
+    if (!Number.isInteger(quantity) || quantity <= 0) {
       throw new BadRequestException('Quantity must be a positive integer');
     }
 
@@ -65,36 +65,36 @@ export class GameService {
 
     if (action === 'buy') {
       const unit = buyPrice(base);
-      const cost = unit * qty;
+      const cost = unit * quantity;
       if (cost > ship.gold) {
         throw new BadRequestException('Not enough gold');
       }
-      if (this.cargoUsed() + qty > ship.cargoCapacity) {
+      if (this.cargoUsed() + quantity > ship.cargoCapacity) {
         throw new BadRequestException('Not enough cargo space');
       }
       ship.gold -= cost;
-      ship.cargo[resource] += qty;
+      ship.cargo[resource] += quantity;
 
       // Add the outlay to this resource's cost basis (money tied up in cargo).
       const stat = this.state.purchases.perResource[resource];
       stat.spent += cost;
-      stat.qty += qty;
+      stat.quantity += quantity;
     } else {
-      if (ship.cargo[resource] < qty) {
+      if (ship.cargo[resource] < quantity) {
         throw new BadRequestException('Not enough goods to sell');
       }
       const unit = sellPrice(base);
-      ship.gold += unit * qty;
-      ship.cargo[resource] -= qty;
+      ship.gold += unit * quantity;
+      ship.cargo[resource] -= quantity;
 
       // Release the average *buy* cost of the units sold from the cost basis,
       // not the sale price. Selling everything zeroes the basis (avg -> 0).
       const stat = this.state.purchases.perResource[resource];
-      const avg = stat.qty > 0 ? stat.spent / stat.qty : 0;
-      stat.qty -= qty;
-      stat.spent -= avg * qty;
-      if (stat.qty <= 0) {
-        stat.qty = 0;
+      const avg = stat.quantity > 0 ? stat.spent / stat.quantity : 0;
+      stat.quantity -= quantity;
+      stat.spent -= avg * quantity;
+      if (stat.quantity <= 0) {
+        stat.quantity = 0;
         stat.spent = 0;
       }
     }
@@ -187,6 +187,16 @@ export class GameService {
       const parsed = JSON.parse(readFileSync(SAVE_FILE, 'utf8')) as GameState;
       // Saves written before purchase tracking existed lack this field.
       if (!parsed.purchases) parsed.purchases = emptyPurchases();
+      // Saves written before `qty` was renamed to `quantity` carry the old key.
+      for (const r of RESOURCES) {
+        const stat = parsed.purchases.perResource[r] as {
+          spent: number;
+          quantity?: number;
+          qty?: number;
+        };
+        if (stat.quantity == null) stat.quantity = stat.qty ?? 0;
+        delete stat.qty;
+      }
       this.logger.log('Loaded saved game state');
       return parsed;
     } catch (err) {
