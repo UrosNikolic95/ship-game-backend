@@ -3,6 +3,9 @@
 /node_modules
 /build
 
+# game save state
+game-state.json
+
 # Logs
 logs
 *.log
