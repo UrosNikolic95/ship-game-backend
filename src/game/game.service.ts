@@ -10,6 +10,8 @@ import {
   sellPrice,
   emptyInventory,
   emptyPurchases,
+  findBoat,
+  PORT_SHIPYARDS,
   DOCK_RADIUS,
 } from './game.types';
 
@@ -109,6 +111,41 @@ export class GameService {
     return this.state;
   }
 
+  // Upgrade the ship to a larger hull sold by the docked port's shipyard. The
+  // old hull is traded in at full value, so the player pays only the difference.
+  buyShip(portId: string, boatId: string): GameState {
+    const port = this.state.ports.find((p) => p.id === portId);
+    if (!port) throw new BadRequestException(`Unknown port: ${portId}`);
+
+    const ship = this.state.ship;
+    const dist = Math.hypot(ship.x - port.x, ship.y - port.y);
+    if (dist > DOCK_RADIUS) {
+      throw new BadRequestException('Ship is not docked at this port');
+    }
+    if (!port.boatIds.includes(boatId)) {
+      throw new BadRequestException("This port's shipyard does not sell that boat");
+    }
+
+    const boat = findBoat(boatId);
+    if (!boat) throw new BadRequestException(`Unknown boat: ${boatId}`);
+    if (boat.cargoCapacity <= ship.cargoCapacity) {
+      throw new BadRequestException('Your ship is already as large or larger');
+    }
+
+    // Trade in the current hull at full value: cost is just the difference.
+    const tradeIn = findBoat(ship.boatId)?.price ?? 0;
+    const cost = boat.price - tradeIn;
+    if (cost > ship.gold) {
+      throw new BadRequestException('Not enough gold');
+    }
+
+    ship.gold -= cost;
+    ship.boatId = boat.id;
+    ship.cargoCapacity = boat.cargoCapacity;
+    this.save();
+    return this.state;
+  }
+
   reset(): GameState {
     this.state = this.createWorld();
     this.save();
@@ -155,6 +192,7 @@ export class GameService {
         gold: 500,
         cargo: emptyInventory(),
         cargoCapacity: 50,
+        boatId: 'sloop',
       },
       ports,
       purchases: emptyPurchases(),
@@ -168,7 +206,7 @@ export class GameService {
     y: number,
     prices: Record<Resource, number>,
   ): Port {
-    return { id, name, x, y, prices };
+    return { id, name, x, y, prices, boatIds: PORT_SHIPYARDS[id] ?? [] };
   }
 
   // ---- persistence ----------------------------------------------------------
@@ -187,6 +225,11 @@ export class GameService {
       const parsed = JSON.parse(readFileSync(SAVE_FILE, 'utf8')) as GameState;
       // Saves written before purchase tracking existed lack this field.
       if (!parsed.purchases) parsed.purchases = emptyPurchases();
+      // Saves written before shipyards existed lack the boat fields.
+      if (!parsed.ship.boatId) parsed.ship.boatId = 'sloop';
+      for (const port of parsed.ports) {
+        if (!port.boatIds) port.boatIds = PORT_SHIPYARDS[port.id] ?? [];
+      }
       // Saves written before `qty` was renamed to `quantity` carry the old key.
       for (const r of RESOURCES) {
         const stat = parsed.purchases.perResource[r] as {

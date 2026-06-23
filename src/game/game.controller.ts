@@ -14,6 +14,11 @@ interface TradeDto {
   action: 'buy' | 'sell';
 }
 
+interface BuyShipDto {
+  portId: string;
+  boatId: string;
+}
+
 @Controller('game')
 export class GameController {
   constructor(private readonly game: GameService) {}
@@ -31,6 +36,11 @@ export class GameController {
   @Post('trade')
   trade(@Body() body: TradeDto): GameState {
     return this.game.trade(body.portId, body.resource, body.quantity, body.action);
+  }
+
+  @Post('buy-ship')
+  buyShip(@Body() body: BuyShipDto): GameState {
+    return this.game.buyShip(body.portId, body.boatId);
   }
 
   @Post('reset')
