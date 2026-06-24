@@ -1,98 +1,95 @@
-<p align="center">
-  <a href="http://nestjs.com/" target="blank"><img src="https://nestjs.com/img/logo-small.svg" width="120" alt="Nest Logo" /></a>
-</p>
+# Ship Game — Backend
 
-[circleci-image]: https://img.shields.io/circleci/build/github/nestjs/nest/master?token=abc123def456
-[circleci-url]: https://circleci.com/gh/nestjs/nest
+The server for a 2D sailing & trading game. A single player captains a ship
+across an unbounded, procedurally generated sea, docks at ports, hauls goods
+between markets to profit on the price spread, and upgrades to bigger hulls.
+This backend is the authoritative source of the game economy and world; the
+[Angular frontend](../frontend) renders it and drives the ship.
 
-  <p align="center">A progressive <a href="http://nodejs.org" target="_blank">Node.js</a> framework for building efficient and scalable server-side applications.</p>
-    <p align="center">
-<a href="https://www.npmjs.com/~nestjscore" target="_blank"><img src="https://img.shields.io/npm/v/@nestjs/core.svg" alt="NPM Version" /></a>
-<a href="https://www.npmjs.com/~nestjscore" target="_blank"><img src="https://img.shields.io/npm/l/@nestjs/core.svg" alt="Package License" /></a>
-<a href="https://www.npmjs.com/~nestjscore" target="_blank"><img src="https://img.shields.io/npm/dm/@nestjs/common.svg" alt="NPM Downloads" /></a>
-<a href="https://circleci.com/gh/nestjs/nest" target="_blank"><img src="https://img.shields.io/circleci/build/github/nestjs/nest/master" alt="CircleCI" /></a>
-<a href="https://discord.gg/G7Qnnhy" target="_blank"><img src="https://img.shields.io/badge/discord-online-brightgreen.svg" alt="Discord"/></a>
-<a href="https://opencollective.com/nest#backer" target="_blank"><img src="https://opencollective.com/nest/backers/badge.svg" alt="Backers on Open Collective" /></a>
-<a href="https://opencollective.com/nest#sponsor" target="_blank"><img src="https://opencollective.com/nest/sponsors/badge.svg" alt="Sponsors on Open Collective" /></a>
-  <a href="https://paypal.me/kamilmysliwiec" target="_blank"><img src="https://img.shields.io/badge/Donate-PayPal-ff3f59.svg" alt="Donate us"/></a>
-    <a href="https://opencollective.com/nest#sponsor"  target="_blank"><img src="https://img.shields.io/badge/Support%20us-Open%20Collective-41B883.svg" alt="Support us"></a>
-  <a href="https://twitter.com/nestframework" target="_blank"><img src="https://img.shields.io/twitter/follow/nestframework.svg?style=social&label=Follow" alt="Follow us on Twitter"></a>
-</p>
-  <!--[![Backers on Open Collective](https://opencollective.com/nest/backers/badge.svg)](https://opencollective.com/nest#backer)
-  [![Sponsors on Open Collective](https://opencollective.com/nest/sponsors/badge.svg)](https://opencollective.com/nest#sponsor)-->
+Built with [NestJS](https://nestjs.com/) and TypeScript.
 
-## Description
+## The game in brief
 
-[Nest](https://github.com/nestjs/nest) framework TypeScript starter repository.
+- **World** — an infinite grid of `4000 × 4000` chunks. Chunk `(0, 0)` is a
+  hand-made starting area with six ports; every other chunk is generated
+  deterministically from a world seed as the ship sails into it, placing 1–3
+  ports with randomized names, prices, and (sometimes) a shipyard.
+- **Trading** — each port has a base price per good. You buy at a markup
+  (`×1.15`) and sell at a markdown (`×0.85`), so profit comes from carrying a
+  good from where it is cheap to where it is dear. The ship must be within
+  `DOCK_RADIUS` (60 world units) of a port to trade.
+- **Goods** — `wood`, `grain`, `iron`, `spice`, `cloth`.
+- **Ships** — four hulls (Sloop → Cutter → Trader → Galleon) with increasing
+  cargo capacity. You start in the Sloop. Upgrading trades the old hull in at
+  full value, so you pay only the price difference, and only at a port whose
+  shipyard builds that hull.
+- **Cost basis** — purchases are tracked per good so the client can show how
+  much gold is tied up in cargo and the average unit cost.
 
-## Project setup
+State is persisted to `game-state.json` in the working directory, so the world
+and your progress survive restarts. The loader migrates older save formats
+forward.
 
-```bash
-$ npm install
+## API
+
+All routes are under `/game`. CORS is enabled for the local Angular dev server.
+
+| Method | Path               | Body                                        | Description                                  |
+| ------ | ------------------ | ------------------------------------------- | -------------------------------------------- |
+| `GET`  | `/game/state`      | —                                           | Current full game state.                     |
+| `POST` | `/game/move`       | `{ x, y }`                                  | Persist the ship's position; generates the chunk it enters. |
+| `POST` | `/game/trade`      | `{ portId, resource, quantity, action }`    | Buy or sell a good at a docked port.         |
+| `POST` | `/game/buy-ship`   | `{ portId, boatId }`                        | Upgrade to a larger hull at a port's shipyard. |
+| `POST` | `/game/reset`      | —                                           | Start a fresh world.                         |
+
+`action` is `'buy' | 'sell'`. Invalid trades (not docked, not enough gold/cargo/
+goods, unknown port/resource) return `400`.
+
+## Project layout
+
+```
+src/
+  main.ts                bootstrap; enables CORS, listens on PORT (default 3000)
+  app.module.ts          root module
+  game/
+    game.controller.ts   HTTP routes under /game
+    game.service.ts      economy rules, world generation, persistence
+    game.types.ts        shared domain types, constants, world-gen helpers
 ```
 
-## Compile and run the project
+## Setup
 
 ```bash
-# development
-$ npm run start
-
-# watch mode
-$ npm run start:dev
-
-# production mode
-$ npm run start:prod
+npm install
 ```
 
-## Run tests
+## Run
 
 ```bash
-# unit tests
-$ npm run test
+# watch mode (recommended for development)
+npm run start:dev
 
-# e2e tests
-$ npm run test:e2e
+# one-off
+npm run start
 
-# test coverage
-$ npm run test:cov
+# production (after `npm run build`)
+npm run start:prod
 ```
 
-## Deployment
+The server listens on `http://localhost:3000` (override with the `PORT`
+environment variable).
 
-When you're ready to deploy your NestJS application to production, there are some key steps you can take to ensure it runs as efficiently as possible. Check out the [deployment documentation](https://docs.nestjs.com/deployment) for more information.
-
-If you are looking for a cloud-based platform to deploy your NestJS application, check out [Mau](https://mau.nestjs.com), our official platform for deploying NestJS applications on AWS. Mau makes deployment straightforward and fast, requiring just a few simple steps:
+## Tests
 
 ```bash
-$ npm install -g @nestjs/mau
-$ mau deploy
+npm run test       # unit tests
+npm run test:e2e   # end-to-end tests
+npm run test:cov   # coverage
 ```
 
-With Mau, you can deploy your application in just a few clicks, allowing you to focus on building features rather than managing infrastructure.
+## Lint & format
 
-## Resources
-
-Check out a few resources that may come in handy when working with NestJS:
-
-- Visit the [NestJS Documentation](https://docs.nestjs.com) to learn more about the framework.
-- For questions and support, please visit our [Discord channel](https://discord.gg/G7Qnnhy).
-- To dive deeper and get more hands-on experience, check out our official video [courses](https://courses.nestjs.com/).
-- Deploy your application to AWS with the help of [NestJS Mau](https://mau.nestjs.com) in just a few clicks.
-- Visualize your application graph and interact with the NestJS application in real-time using [NestJS Devtools](https://devtools.nestjs.com).
-- Need help with your project (part-time to full-time)? Check out our official [enterprise support](https://enterprise.nestjs.com).
-- To stay in the loop and get updates, follow us on [X](https://x.com/nestframework) and [LinkedIn](https://linkedin.com/company/nestjs).
-- Looking for a job, or have a job to offer? Check out our official [Jobs board](https://jobs.nestjs.com).
-
-## Support
-
-Nest is an MIT-licensed open source project. It can grow thanks to the sponsors and support by the amazing backers. If you'd like to join them, please [read more here](https://docs.nestjs.com/support).
-
-## Stay in touch
-
-- Author - [Kamil Myśliwiec](https://twitter.com/kammysliwiec)
-- Website - [https://nestjs.com](https://nestjs.com/)
-- Twitter - [@nestframework](https://twitter.com/nestframework)
-
-## License
-
-Nest is [MIT licensed](https://github.com/nestjs/nest/blob/master/LICENSE).
+```bash
+npm run lint
+npm run format
+```
