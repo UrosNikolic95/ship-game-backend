@@ -13,6 +13,13 @@ import {
   findBoat,
   PORT_SHIPYARDS,
   DOCK_RADIUS,
+  CHUNK_SIZE,
+  PORT_MARGIN,
+  chunkOf,
+  mulberry32,
+  hashChunk,
+  generatePortName,
+  generatePrices,
 } from './game.types';
 
 // State is persisted here so the game "remembers" itself across restarts.
@@ -33,10 +40,12 @@ export class GameService {
   }
 
   // The player drives the ship client-side; we just persist where it ended up.
+  // The world is unbounded, so there's no clamp — but we make sure the chunk the
+  // ship now sits in exists (the client also requests this as it crosses edges).
   moveShip(x: number, y: number): GameState {
-    const { width, height } = this.state.world;
-    this.state.ship.x = clamp(x, 0, width);
-    this.state.ship.y = clamp(y, 0, height);
+    this.state.ship.x = x;
+    this.state.ship.y = y;
+    this.ensureChunk(chunkOf(x), chunkOf(y));
     this.save();
     return this.state;
   }
@@ -159,10 +168,9 @@ export class GameService {
   // ---- world generation ----------------------------------------------------
 
   private createWorld(): GameState {
-    const world = { width: 4000, height: 4000 };
-
     // Hand-placed ports with distinct price profiles so that hauling a good
-    // from where it is cheap to where it is dear is always worthwhile.
+    // from where it is cheap to where it is dear is always worthwhile. These
+    // make up the starting chunk (0,0); everything beyond is generated on the fly.
     const ports: Port[] = [
       this.port('harbor', 'Old Harbor', 600, 700, {
         wood: 8, grain: 6, iron: 22, spice: 40, cloth: 18,
@@ -185,7 +193,10 @@ export class GameService {
     ];
 
     return {
-      world,
+      chunkSize: CHUNK_SIZE,
+      seed: Math.floor(Math.random() * 0xffffffff),
+      // The curated starting area is chunk (0,0).
+      chunks: [{ cx: 0, cy: 0 }],
       ship: {
         x: 850,
         y: 850,
@@ -197,6 +208,56 @@ export class GameService {
       ports,
       purchases: emptyPurchases(),
     };
+  }
+
+  // ---- chunk generation -----------------------------------------------------
+
+  // Generate the chunk at (cx, cy) if it doesn't exist yet, appending its ports
+  // to the flat port list. Idempotent: re-requesting a chunk is a no-op.
+  ensureChunk(cx: number, cy: number): GameState {
+    if (this.state.chunks.some((c) => c.cx === cx && c.cy === cy)) {
+      return this.state;
+    }
+    const ports = this.generateChunk(cx, cy);
+    this.state.ports.push(...ports);
+    this.state.chunks.push({ cx, cy });
+    this.save();
+    return this.state;
+  }
+
+  // Procedurally place 1–3 ports inside a chunk, seeded so the same chunk always
+  // produces the same ports. Chunk (0,0) is hand-made and never generated here.
+  private generateChunk(cx: number, cy: number): Port[] {
+    const rng = mulberry32(hashChunk(this.state.seed, cx, cy));
+    const baseX = cx * CHUNK_SIZE;
+    const baseY = cy * CHUNK_SIZE;
+    const span = CHUNK_SIZE - PORT_MARGIN * 2;
+
+    const count = 1 + Math.floor(rng() * 3); // 1..3
+    const ports: Port[] = [];
+    let attempts = 0;
+    while (ports.length < count && attempts < 30) {
+      attempts++;
+      const x = baseX + PORT_MARGIN + rng() * span;
+      const y = baseY + PORT_MARGIN + rng() * span;
+      // Keep ports inside a chunk spaced out so their dock rings don't overlap.
+      if (ports.some((p) => Math.hypot(p.x - x, p.y - y) < 600)) continue;
+
+      const i = ports.length;
+      // ~25% of ports have a shipyard; bigger ports build bigger hulls.
+      let boatIds: string[] = [];
+      if (rng() < 0.25) boatIds = rng() < 0.4 ? ['cutter', 'trader'] : ['cutter'];
+
+      ports.push({
+        id: `port-${cx}-${cy}-${i}`,
+        name: generatePortName(rng),
+        x: Math.round(x),
+        y: Math.round(y),
+        prices: generatePrices(rng),
+        boatIds,
+      });
+    }
+    return ports;
   }
 
   private port(
@@ -222,7 +283,14 @@ export class GameService {
   private load(): GameState | null {
     try {
       if (!existsSync(SAVE_FILE)) return null;
-      const parsed = JSON.parse(readFileSync(SAVE_FILE, 'utf8')) as GameState;
+      const parsed = JSON.parse(readFileSync(SAVE_FILE, 'utf8')) as GameState &
+        { world?: { width: number; height: number } };
+      // Saves written before the chunked world lack these fields: the old fixed
+      // 4000x4000 world becomes chunk (0,0) and we mint a fresh seed for the rest.
+      if (!parsed.chunkSize) parsed.chunkSize = CHUNK_SIZE;
+      if (parsed.seed == null) parsed.seed = Math.floor(Math.random() * 0xffffffff);
+      if (!parsed.chunks) parsed.chunks = [{ cx: 0, cy: 0 }];
+      delete parsed.world;
       // Saves written before purchase tracking existed lack this field.
       if (!parsed.purchases) parsed.purchases = emptyPurchases();
       // Saves written before shipyards existed lack the boat fields.
@@ -247,8 +315,4 @@ export class GameService {
       return null;
     }
   }
-}
-
-function clamp(v: number, min: number, max: number): number {
-  return Math.max(min, Math.min(max, v));
 }
