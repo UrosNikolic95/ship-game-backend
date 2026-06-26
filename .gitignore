@@ -5,6 +5,8 @@
 
 # game save state
 game-state.json
+# per-user game save state
+/data
 
 # Logs
 logs

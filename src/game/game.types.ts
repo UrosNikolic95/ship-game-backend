@@ -76,16 +76,36 @@ export interface ChunkCoord {
   cy: number;
 }
 
-export interface GameState {
+// The shared world every player sails in: the map, its seed, the chunks that
+// have been explored so far, and every port. There is exactly one of these for
+// the whole server, so a port one player discovers is visible to everyone.
+export interface World {
   // World units per chunk. The world is an unbounded grid of these squares.
   chunkSize: number;
   // World seed; chunk content is generated deterministically from it.
   seed: number;
   // Chunks generated so far. Chunk (0,0) is the hand-made starting world; the
-  // rest are procedurally generated as the ship sails into them.
+  // rest are procedurally generated as players sail into them.
+  chunks: ChunkCoord[];
+  // All ports across every generated chunk, in absolute world coordinates.
+  ports: Port[];
+}
+
+// One player's private progress within the shared world: their ship (position,
+// gold, cargo, hull) and their cost-basis bookkeeping.
+export interface Player {
+  ship: Ship;
+  purchases: PurchaseStats;
+}
+
+// The state sent to a client: the shared world flattened together with the
+// requesting player's own ship and purchases. Shape is unchanged from before,
+// so the frontend doesn't need to know the world is now shared.
+export interface GameState {
+  chunkSize: number;
+  seed: number;
   chunks: ChunkCoord[];
   ship: Ship;
-  // All ports across every generated chunk, in absolute world coordinates.
   ports: Port[];
   purchases: PurchaseStats;
 }
