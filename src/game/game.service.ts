@@ -1,6 +1,20 @@
-import { Injectable, Logger, BadRequestException } from '@nestjs/common';
-import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'fs';
+import {
+  Injectable,
+  Logger,
+  BadRequestException,
+  OnModuleInit,
+} from '@nestjs/common';
+import { InjectRepository } from '@nestjs/typeorm';
+import { Repository } from 'typeorm';
+import { existsSync, readFileSync, readdirSync } from 'fs';
 import { join } from 'path';
+import { WorldChunkEntity } from './entities/world-chunk.entity';
+import { PortEntity } from './entities/port.entity';
+import { ShipEntity } from './entities/ship.entity';
+import { ShipInventoryEntity } from './entities/ship-inventory.entity';
+import { PurchaseEntity } from './entities/purchase.entity';
+import { BoatTypeEntity } from './entities/boat-type.entity';
+import { BoatForSaleEntity } from './entities/boat-for-sale.entity';
 import {
   GameState,
   World,
@@ -8,6 +22,7 @@ import {
   Port,
   Resource,
   RESOURCES,
+  BOATS,
   buyPrice,
   sellPrice,
   emptyInventory,
@@ -24,33 +39,72 @@ import {
   generatePrices,
 } from './game.types';
 
-// Everyone shares one world, persisted here. Each player's private progress
-// (ship, gold, cargo, purchases) is persisted to its own file under players/.
-const SAVE_DIR = join(process.cwd(), 'data');
-const WORLD_FILE = join(SAVE_DIR, 'world.json');
-const PLAYERS_DIR = join(SAVE_DIR, 'players');
+// Fixed world seed. Chunk content is generated deterministically from it, and
+// every generated chunk and its ports are persisted, so the world is fully
+// reconstructed from the database — the seed only needs to be stable enough to
+// generate not-yet-visited chunks the same way, which a constant guarantees
+// without needing its own row.
+const WORLD_SEED = 0x9e3779b1;
+
+// Legacy on-disk save locations. Data here is imported into the database once,
+// the first time the server starts against an empty database, so existing
+// progress survives the move from files to PostgreSQL.
+const LEGACY_DIR = join(process.cwd(), 'data');
+const LEGACY_WORLD_FILE = join(LEGACY_DIR, 'world.json');
+const LEGACY_PLAYERS_DIR = join(LEGACY_DIR, 'players');
 
 @Injectable()
-export class GameService {
+export class GameService implements OnModuleInit {
   private readonly logger = new Logger(GameService.name);
-  // The single world all players sail in.
-  private world: World;
-  // One player record per user, keyed by the user id carried in their cookie.
+  // The single world all players sail in, cached in memory and written through
+  // to the database as chunks are explored.
+  private world!: World;
+  // Game-logic view of each loaded player, keyed by the user id from their cookie.
   private readonly players = new Map<string, Player>();
+  // The managed ship row backing each loaded player, kept so that saving updates
+  // the existing rows (and their child cargo/purchase rows) in place rather than
+  // inserting duplicates.
+  private readonly shipEntities = new Map<string, ShipEntity>();
+  // The boat-type catalog, loaded once from the database and keyed by boat key,
+  // so ships and ports can reference the managed rows when they are saved.
+  private readonly boatTypes = new Map<string, BoatTypeEntity>();
 
-  constructor() {
-    mkdirSync(PLAYERS_DIR, { recursive: true });
-    this.world = this.loadWorld() ?? this.createWorld();
-    this.saveWorld();
+  constructor(
+    @InjectRepository(WorldChunkEntity)
+    private readonly chunkRepo: Repository<WorldChunkEntity>,
+    @InjectRepository(PortEntity)
+    private readonly portRepo: Repository<PortEntity>,
+    @InjectRepository(ShipEntity)
+    private readonly shipRepo: Repository<ShipEntity>,
+    @InjectRepository(BoatTypeEntity)
+    private readonly boatTypeRepo: Repository<BoatTypeEntity>,
+  ) {}
+
+  // The database connection isn't ready until Nest has finished wiring modules,
+  // so load (or create) the shared world here rather than in the constructor.
+  async onModuleInit(): Promise<void> {
+    await this.seedBoatTypes();
+    await this.importLegacyFilesIfEmpty();
+    const loaded = await this.loadWorld();
+    if (loaded) {
+      this.world = loaded;
+    } else {
+      this.world = this.createWorld();
+      await this.persistInitialWorld();
+    }
   }
 
-  // Make sure a player record exists for this user: load their saved file, or
+  // Make sure a player record exists for this user: load their saved ship, or
   // start a fresh player at the world's spawn. Called before every request.
-  ensureUser(userId: string): void {
+  async ensureUser(userId: string): Promise<void> {
     if (this.players.has(userId)) return;
-    const player = this.loadPlayer(userId) ?? this.createPlayer();
-    this.players.set(userId, player);
-    this.savePlayer(userId);
+    const loaded = await this.loadPlayer(userId);
+    if (loaded) {
+      this.players.set(userId, loaded);
+    } else {
+      this.players.set(userId, this.createPlayer());
+      await this.savePlayer(userId);
+    }
   }
 
   getState(userId: string): GameState {
@@ -60,22 +114,22 @@ export class GameService {
   // The player drives the ship client-side; we just persist where it ended up.
   // The world is unbounded, so there's no clamp — but we make sure the chunk the
   // ship now sits in exists (the client also requests this as it crosses edges).
-  moveShip(userId: string, x: number, y: number): GameState {
+  async moveShip(userId: string, x: number, y: number): Promise<GameState> {
     const player = this.playerOf(userId);
     player.ship.x = x;
     player.ship.y = y;
-    this.ensureChunk(chunkOf(x), chunkOf(y));
-    this.savePlayer(userId);
+    await this.ensureChunk(chunkOf(x), chunkOf(y));
+    await this.savePlayer(userId);
     return this.viewFor(userId);
   }
 
-  trade(
+  async trade(
     userId: string,
     portId: string,
     resource: Resource,
     quantity: number,
     action: 'buy' | 'sell',
-  ): GameState {
+  ): Promise<GameState> {
     if (!RESOURCES.includes(resource)) {
       throw new BadRequestException(`Unknown resource: ${resource}`);
     }
@@ -137,13 +191,17 @@ export class GameService {
       0,
     );
 
-    this.savePlayer(userId);
+    await this.savePlayer(userId);
     return this.viewFor(userId);
   }
 
   // Upgrade the ship to a larger hull sold by the docked port's shipyard. The
   // old hull is traded in at full value, so the player pays only the difference.
-  buyShip(userId: string, portId: string, boatId: string): GameState {
+  async buyShip(
+    userId: string,
+    portId: string,
+    boatId: string,
+  ): Promise<GameState> {
     const player = this.playerOf(userId);
     const port = this.world.ports.find((p) => p.id === portId);
     if (!port) throw new BadRequestException(`Unknown port: ${portId}`);
@@ -154,7 +212,9 @@ export class GameService {
       throw new BadRequestException('Ship is not docked at this port');
     }
     if (!port.boatIds.includes(boatId)) {
-      throw new BadRequestException("This port's shipyard does not sell that boat");
+      throw new BadRequestException(
+        "This port's shipyard does not sell that boat",
+      );
     }
 
     const boat = findBoat(boatId);
@@ -173,16 +233,16 @@ export class GameService {
     ship.gold -= cost;
     ship.boatId = boat.id;
     ship.cargoCapacity = boat.cargoCapacity;
-    this.savePlayer(userId);
+    await this.savePlayer(userId);
     return this.viewFor(userId);
   }
 
   // Reset only this player back to a fresh start. The shared world (map, ports,
   // explored chunks) is untouched, so one player resetting doesn't wipe the
   // world out from under everyone else.
-  reset(userId: string): GameState {
+  async reset(userId: string): Promise<GameState> {
     this.players.set(userId, this.createPlayer());
-    this.savePlayer(userId);
+    await this.savePlayer(userId);
     return this.viewFor(userId);
   }
 
@@ -222,28 +282,52 @@ export class GameService {
     // make up the starting chunk (0,0); everything beyond is generated on the fly.
     const ports: Port[] = [
       this.port('harbor', 'Old Harbor', 600, 700, {
-        wood: 8, grain: 6, iron: 22, spice: 40, cloth: 18,
+        wood: 8,
+        grain: 6,
+        iron: 22,
+        spice: 40,
+        cloth: 18,
       }),
       this.port('saltmoor', 'Saltmoor', 3100, 900, {
-        wood: 14, grain: 5, iron: 30, spice: 18, cloth: 12,
+        wood: 14,
+        grain: 5,
+        iron: 30,
+        spice: 18,
+        cloth: 12,
       }),
       this.port('ironcliff', 'Ironcliff', 1900, 1700, {
-        wood: 20, grain: 12, iron: 9, spice: 33, cloth: 26,
+        wood: 20,
+        grain: 12,
+        iron: 9,
+        spice: 33,
+        cloth: 26,
       }),
       this.port('greenport', 'Greenport', 800, 3100, {
-        wood: 7, grain: 14, iron: 26, spice: 28, cloth: 9,
+        wood: 7,
+        grain: 14,
+        iron: 26,
+        spice: 28,
+        cloth: 9,
       }),
       this.port('sunreach', 'Sunreach', 3300, 3200, {
-        wood: 16, grain: 9, iron: 19, spice: 7, cloth: 30,
+        wood: 16,
+        grain: 9,
+        iron: 19,
+        spice: 7,
+        cloth: 30,
       }),
       this.port('mistbay', 'Mistbay', 2200, 2600, {
-        wood: 11, grain: 8, iron: 15, spice: 24, cloth: 21,
+        wood: 11,
+        grain: 8,
+        iron: 15,
+        spice: 24,
+        cloth: 21,
       }),
     ];
 
     return {
       chunkSize: CHUNK_SIZE,
-      seed: Math.floor(Math.random() * 0xffffffff),
+      seed: WORLD_SEED,
       // The curated starting area is chunk (0,0).
       chunks: [{ cx: 0, cy: 0 }],
       ports,
@@ -270,14 +354,26 @@ export class GameService {
   // appending its ports to the flat port list. Idempotent: re-requesting a chunk
   // is a no-op. Because the world is shared, any player can trigger this and the
   // new ports become visible to everyone.
-  ensureChunk(cx: number, cy: number): void {
+  async ensureChunk(cx: number, cy: number): Promise<void> {
     if (this.world.chunks.some((c) => c.cx === cx && c.cy === cy)) {
       return;
     }
-    const ports = this.generateChunk(cx, cy);
-    this.world.ports.push(...ports);
-    this.world.chunks.push({ cx, cy });
-    this.saveWorld();
+    const generated = this.generateChunk(cx, cy);
+    try {
+      await this.chunkRepo.save(this.chunkRepo.create({ cx, cy }));
+      let savedPorts: Port[] = [];
+      if (generated.length > 0) {
+        const rows = await this.portRepo.save(
+          generated.map((p) => this.portToEntity(p)),
+        );
+        // Re-read so the in-memory ports carry their database-assigned ids.
+        savedPorts = rows.map((e) => this.entityToPort(e));
+      }
+      this.world.ports.push(...savedPorts);
+      this.world.chunks.push({ cx, cy });
+    } catch (err) {
+      this.logger.error(`Failed to save chunk (${cx},${cy}): ${String(err)}`);
+    }
   }
 
   // Procedurally place 1–3 ports inside a chunk, seeded so the same chunk always
@@ -301,7 +397,8 @@ export class GameService {
       const i = ports.length;
       // ~25% of ports have a shipyard; bigger ports build bigger hulls.
       let boatIds: string[] = [];
-      if (rng() < 0.25) boatIds = rng() < 0.4 ? ['cutter', 'trader'] : ['cutter'];
+      if (rng() < 0.25)
+        boatIds = rng() < 0.4 ? ['cutter', 'trader'] : ['cutter'];
 
       ports.push({
         id: `port-${cx}-${cy}-${i}`,
@@ -325,77 +422,314 @@ export class GameService {
     return { id, name, x, y, prices, boatIds: PORT_SHIPYARDS[id] ?? [] };
   }
 
+  // ---- entity <-> domain mapping -------------------------------------------
+
+  // Builds a port row from a domain port. The port's domain id is the database
+  // id, assigned on insert, so it is not set here (it is filled in by
+  // entityToPort once the row has been saved).
+  private portToEntity(port: Port): PortEntity {
+    return this.portRepo.create({
+      name: port.name,
+      x: port.x,
+      y: port.y,
+      priceWood: port.prices.wood,
+      priceGrain: port.prices.grain,
+      priceIron: port.prices.iron,
+      priceSpice: port.prices.spice,
+      priceCloth: port.prices.cloth,
+      // One boat-for-sale row per hull this port's shipyard offers. Cascaded
+      // through the port, so saving the port saves these too.
+      boatsForSale: port.boatIds.map((boatId) =>
+        this.portRepo.manager.create(BoatForSaleEntity, {
+          boatType: this.boatTypeFor(boatId),
+        }),
+      ),
+    });
+  }
+
+  private entityToPort(e: PortEntity): Port {
+    return {
+      // The client refers to a port by its database id (as a string).
+      id: String(e.id),
+      name: e.name,
+      x: e.x,
+      y: e.y,
+      prices: {
+        wood: e.priceWood,
+        grain: e.priceGrain,
+        iron: e.priceIron,
+        spice: e.priceSpice,
+        cloth: e.priceCloth,
+      },
+      boatIds: (e.boatsForSale ?? []).map((b) => this.boatIdOf(b.boatType)),
+    };
+  }
+
+  // Build a fresh ship row (with its five cargo and five purchase rows) for a
+  // user from the game-logic player. Used when persisting a player for the first
+  // time; the returned entity has no ids until saved.
+  private newShipEntity(userId: string, player: Player): ShipEntity {
+    const entity = this.shipRepo.create({
+      userId,
+      x: player.ship.x,
+      y: player.ship.y,
+      gold: player.ship.gold,
+      boatType: this.boatTypeFor(player.ship.boatId),
+      inventory: RESOURCES.map(
+        (r) => ({ resource: r, quantity: 0 }) as ShipInventoryEntity,
+      ),
+      purchases: RESOURCES.map(
+        (r) => ({ resource: r, spent: 0, quantity: 0 }) as PurchaseEntity,
+      ),
+    });
+    return entity;
+  }
+
+  private entityToPlayer(e: ShipEntity): Player {
+    const cargo = emptyInventory();
+    for (const inv of e.inventory) {
+      if (RESOURCES.includes(inv.resource as Resource)) {
+        cargo[inv.resource as Resource] = inv.quantity;
+      }
+    }
+
+    const purchases = emptyPurchases();
+    for (const pr of e.purchases) {
+      if (RESOURCES.includes(pr.resource as Resource)) {
+        purchases.perResource[pr.resource as Resource] = {
+          spent: pr.spent,
+          quantity: pr.quantity,
+        };
+      }
+    }
+    purchases.totalSpent = RESOURCES.reduce(
+      (sum, r) => sum + purchases.perResource[r].spent,
+      0,
+    );
+
+    return {
+      ship: {
+        x: e.x,
+        y: e.y,
+        gold: e.gold,
+        cargo,
+        // Cargo capacity is defined by the owned boat type.
+        cargoCapacity: e.boatType.cargoCapacity,
+        boatId: this.boatIdOf(e.boatType),
+      },
+      purchases,
+    };
+  }
+
   // ---- persistence ----------------------------------------------------------
 
-  // Per-user save file. The user id comes from a validated cookie (see the
-  // controller), so it is safe to use directly as a file name.
-  private playerFile(userId: string): string {
-    return join(PLAYERS_DIR, `${userId}.json`);
+  // Populate the boat-type catalog from the BOATS constant the first time the
+  // server runs, then load every boat type into memory so ships and ports can
+  // reference the managed rows. Idempotent across restarts.
+  private async seedBoatTypes(): Promise<void> {
+    if ((await this.boatTypeRepo.count()) === 0) {
+      await this.boatTypeRepo.save(
+        BOATS.map((b) =>
+          this.boatTypeRepo.create({
+            name: b.name,
+            cargoCapacity: b.cargoCapacity,
+            price: b.price,
+          }),
+        ),
+      );
+      this.logger.log(`Seeded ${BOATS.length} boat types`);
+    }
+    const rows = await this.boatTypeRepo.find();
+    for (const row of rows) this.boatTypes.set(this.boatIdOf(row), row);
   }
 
-  private saveWorld(): void {
+  // The game's domain boat id for a boat type: the lower-cased hull name (e.g.
+  // 'Cutter' -> 'cutter'), matching the ids in the shared BOATS catalog.
+  private boatIdOf(boatType: BoatTypeEntity): string {
+    return boatType.name.toLowerCase();
+  }
+
+  // The managed boat-type row for a domain boat id. Throws on an unknown id,
+  // since every hull a ship or shipyard refers to must exist in the catalog.
+  private boatTypeFor(boatId: string): BoatTypeEntity {
+    const boatType = this.boatTypes.get(boatId);
+    if (!boatType) {
+      throw new Error(`Unknown boat type: ${boatId}`);
+    }
+    return boatType;
+  }
+
+  private async persistInitialWorld(): Promise<void> {
     try {
-      writeFileSync(WORLD_FILE, JSON.stringify(this.world, null, 2));
+      await this.chunkRepo.save(
+        this.world.chunks.map((c) => this.chunkRepo.create(c)),
+      );
+      const rows = await this.portRepo.save(
+        this.world.ports.map((p) => this.portToEntity(p)),
+      );
+      // Re-read so the in-memory ports carry their database-assigned ids.
+      this.world.ports = rows.map((e) => this.entityToPort(e));
+      this.logger.log('Created and persisted the starting world');
     } catch (err) {
-      this.logger.error(`Failed to save world: ${String(err)}`);
+      this.logger.error(`Failed to persist initial world: ${String(err)}`);
     }
   }
 
-  private savePlayer(userId: string): void {
-    const player = this.players.get(userId);
-    if (!player) return;
+  private async loadWorld(): Promise<World | null> {
     try {
-      writeFileSync(this.playerFile(userId), JSON.stringify(player, null, 2));
-    } catch (err) {
-      this.logger.error(`Failed to save player ${userId}: ${String(err)}`);
-    }
-  }
-
-  private loadWorld(): World | null {
-    try {
-      if (!existsSync(WORLD_FILE)) return null;
-      const parsed = JSON.parse(readFileSync(WORLD_FILE, 'utf8')) as World;
-      if (!parsed.chunkSize) parsed.chunkSize = CHUNK_SIZE;
-      if (parsed.seed == null) parsed.seed = Math.floor(Math.random() * 0xffffffff);
-      if (!parsed.chunks) parsed.chunks = [{ cx: 0, cy: 0 }];
-      // Saves written before shipyards existed lack the boat fields.
-      for (const port of parsed.ports) {
-        if (!port.boatIds) port.boatIds = PORT_SHIPYARDS[port.id] ?? [];
-      }
-      this.logger.log('Loaded shared world');
-      return parsed;
+      const chunkRows = await this.chunkRepo.find();
+      if (chunkRows.length === 0) return null;
+      const portRows = await this.portRepo.find();
+      this.logger.log(
+        `Loaded shared world (${chunkRows.length} chunks, ${portRows.length} ports)`,
+      );
+      return {
+        chunkSize: CHUNK_SIZE,
+        seed: WORLD_SEED,
+        chunks: chunkRows.map((c) => ({ cx: c.cx, cy: c.cy })),
+        ports: portRows.map((p) => this.entityToPort(p)),
+      };
     } catch (err) {
       this.logger.warn(`Could not load world, starting fresh: ${String(err)}`);
       return null;
     }
   }
 
-  private loadPlayer(userId: string): Player | null {
-    const file = this.playerFile(userId);
+  private async loadPlayer(userId: string): Promise<Player | null> {
     try {
-      if (!existsSync(file)) return null;
-      const parsed = JSON.parse(readFileSync(file, 'utf8')) as Player;
-      // Saves written before purchase tracking existed lack this field.
-      if (!parsed.purchases) parsed.purchases = emptyPurchases();
-      // Saves written before shipyards existed lack the boat field.
-      if (!parsed.ship.boatId) parsed.ship.boatId = 'sloop';
-      // Saves written before `qty` was renamed to `quantity` carry the old key.
-      for (const r of RESOURCES) {
-        const stat = parsed.purchases.perResource[r] as {
-          spent: number;
-          quantity?: number;
-          qty?: number;
-        };
-        if (stat.quantity == null) stat.quantity = stat.qty ?? 0;
-        delete stat.qty;
-      }
+      const entity = await this.shipRepo.findOne({ where: { userId } });
+      if (!entity) return null;
+      // Hold onto the managed row so later saves update it (and its children) in
+      // place instead of inserting duplicates.
+      this.shipEntities.set(userId, entity);
       this.logger.log(`Loaded player ${userId}`);
-      return parsed;
+      return this.entityToPlayer(entity);
     } catch (err) {
       this.logger.warn(
         `Could not load player ${userId}, starting fresh: ${String(err)}`,
       );
       return null;
+    }
+  }
+
+  // Write a player's current state through to its ship row and the child cargo
+  // and purchase rows. Reuses the cached managed entity when present so the same
+  // rows are updated; otherwise creates fresh rows for a brand-new player.
+  private async savePlayer(userId: string): Promise<void> {
+    const player = this.players.get(userId);
+    if (!player) return;
+
+    let entity = this.shipEntities.get(userId);
+    if (!entity) {
+      entity = this.newShipEntity(userId, player);
+      this.shipEntities.set(userId, entity);
+    }
+
+    entity.x = player.ship.x;
+    entity.y = player.ship.y;
+    entity.gold = player.ship.gold;
+    entity.boatType = this.boatTypeFor(player.ship.boatId);
+    for (const inv of entity.inventory) {
+      inv.quantity = player.ship.cargo[inv.resource as Resource] ?? 0;
+    }
+    for (const pr of entity.purchases) {
+      const stat = player.purchases.perResource[pr.resource as Resource];
+      pr.spent = stat?.spent ?? 0;
+      pr.quantity = stat?.quantity ?? 0;
+    }
+
+    try {
+      // Cascade saves the ship and its cargo/purchase rows together.
+      const saved = await this.shipRepo.save(entity);
+      this.shipEntities.set(userId, saved);
+    } catch (err) {
+      this.logger.error(`Failed to save player ${userId}: ${String(err)}`);
+    }
+  }
+
+  // ---- save-format normalization (legacy imports) ---------------------------
+
+  // Patch up older saved shapes so legacy file data loads cleanly.
+  private normalizeWorld(parsed: World): World {
+    if (!parsed.chunks) parsed.chunks = [{ cx: 0, cy: 0 }];
+    // Saves written before shipyards existed lack the boat fields.
+    for (const port of parsed.ports) {
+      if (!port.boatIds) port.boatIds = PORT_SHIPYARDS[port.id] ?? [];
+    }
+    return parsed;
+  }
+
+  private normalizePlayer(parsed: Player): Player {
+    // Saves written before purchase tracking existed lack this field.
+    if (!parsed.purchases) parsed.purchases = emptyPurchases();
+    // Saves written before shipyards existed lack the boat field.
+    if (!parsed.ship.boatId) parsed.ship.boatId = 'sloop';
+    // Saves written before `qty` was renamed to `quantity` carry the old key.
+    for (const r of RESOURCES) {
+      const stat = parsed.purchases.perResource[r] as {
+        spent: number;
+        quantity?: number;
+        qty?: number;
+      };
+      if (stat.quantity == null) stat.quantity = stat.qty ?? 0;
+      delete stat.qty;
+    }
+    return parsed;
+  }
+
+  // ---- one-time legacy import -----------------------------------------------
+
+  // The world and players used to be stored as JSON files under data/. The first
+  // time the server runs against an empty database, pull any of those files into
+  // the normalized tables so existing progress carries over. Runs once: after the
+  // import the tables are no longer empty, so subsequent startups skip it.
+  private async importLegacyFilesIfEmpty(): Promise<void> {
+    try {
+      const chunkCount = await this.chunkRepo.count();
+      const shipCount = await this.shipRepo.count();
+      if (chunkCount > 0 || shipCount > 0) return;
+
+      if (existsSync(LEGACY_WORLD_FILE)) {
+        const world = this.normalizeWorld(
+          JSON.parse(readFileSync(LEGACY_WORLD_FILE, 'utf8')) as World,
+        );
+        await this.chunkRepo.save(
+          world.chunks.map((c) => this.chunkRepo.create(c)),
+        );
+        await this.portRepo.save(world.ports.map((p) => this.portToEntity(p)));
+        this.logger.log('Imported legacy world.json into the database');
+      }
+
+      if (existsSync(LEGACY_PLAYERS_DIR)) {
+        const files = readdirSync(LEGACY_PLAYERS_DIR).filter((f) =>
+          f.endsWith('.json'),
+        );
+        for (const file of files) {
+          const userId = file.replace(/\.json$/, '');
+          const player = this.normalizePlayer(
+            JSON.parse(
+              readFileSync(join(LEGACY_PLAYERS_DIR, file), 'utf8'),
+            ) as Player,
+          );
+          const entity = this.newShipEntity(userId, player);
+          for (const inv of entity.inventory) {
+            inv.quantity = player.ship.cargo[inv.resource as Resource] ?? 0;
+          }
+          for (const pr of entity.purchases) {
+            const stat = player.purchases.perResource[pr.resource as Resource];
+            pr.spent = stat?.spent ?? 0;
+            pr.quantity = stat?.quantity ?? 0;
+          }
+          await this.shipRepo.save(entity);
+        }
+        if (files.length > 0) {
+          this.logger.log(
+            `Imported ${files.length} legacy player file(s) into the database`,
+          );
+        }
+      }
+    } catch (err) {
+      this.logger.warn(`Legacy file import skipped: ${String(err)}`);
     }
   }
 }

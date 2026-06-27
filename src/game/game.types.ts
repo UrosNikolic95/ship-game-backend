@@ -184,12 +184,40 @@ export function hashChunk(seed: number, cx: number, cy: number): number {
 
 // Syllables stitched into procedural port names.
 const NAME_PREFIXES = [
-  'Black', 'Storm', 'Gull', 'Wind', 'Tide', 'Coral', 'Drift', 'Frost',
-  'Amber', 'Dusk', 'Reef', 'Pearl', 'Shoal', 'Bramble', 'Hollow', 'Thorn',
+  'Black',
+  'Storm',
+  'Gull',
+  'Wind',
+  'Tide',
+  'Coral',
+  'Drift',
+  'Frost',
+  'Amber',
+  'Dusk',
+  'Reef',
+  'Pearl',
+  'Shoal',
+  'Bramble',
+  'Hollow',
+  'Thorn',
 ];
 const NAME_SUFFIXES = [
-  'haven', 'reach', 'port', 'bay', 'wick', 'crest', 'fall', 'moor',
-  'cove', 'gate', 'watch', 'hollow', 'point', 'shore', 'landing', 'keep',
+  'haven',
+  'reach',
+  'port',
+  'bay',
+  'wick',
+  'crest',
+  'fall',
+  'moor',
+  'cove',
+  'gate',
+  'watch',
+  'hollow',
+  'point',
+  'shore',
+  'landing',
+  'keep',
 ];
 
 // Build a port name from the RNG. Coordinates are appended only on collision by

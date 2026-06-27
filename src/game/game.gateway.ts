@@ -90,7 +90,12 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect {
     @MessageBody() body: MoveMessage,
   ): void {
     const userId: string = client.data.userId;
-    if (!userId || !body || typeof body.x !== 'number' || typeof body.y !== 'number') {
+    if (
+      !userId ||
+      !body ||
+      typeof body.x !== 'number' ||
+      typeof body.y !== 'number'
+    ) {
       return;
     }
 
@@ -128,6 +133,9 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect {
   // A short, stable display name derived from the user id, so other players show
   // up as e.g. "Sailor 4f3a" rather than a raw UUID.
   private nameFor(userId: string): string {
-    return `Sailor ${userId.replace(/[^a-f0-9]/gi, '').slice(0, 4).toUpperCase()}`;
+    return `Sailor ${userId
+      .replace(/[^a-f0-9]/gi, '')
+      .slice(0, 4)
+      .toUpperCase()}`;
   }
 }

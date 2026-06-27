@@ -26,9 +26,25 @@ Built with [NestJS](https://nestjs.com/) and TypeScript.
 - **Cost basis** — purchases are tracked per good so the client can show how
   much gold is tied up in cargo and the average unit cost.
 
-State is persisted to `game-state.json` in the working directory, so the world
-and your progress survive restarts. The loader migrates older save formats
-forward.
+State is persisted to a **PostgreSQL** database (via TypeORM), so the shared
+world and each player's progress survive restarts. The schema is normalized:
+
+- `world_chunk` — one row per explored chunk.
+- `ports` — one row per port, with per-resource base prices as columns.
+- `boat_type` — the hull catalog (Sloop → Galleon); cargo capacity and price per
+  hull. Seeded from the `BOATS` constant on first startup.
+- `boat_for_sale` — which boat types each port's shipyard sells (a port ↔ boat
+  type link table).
+- `ship` — one row per player (keyed by the cookie `userId`); the hull it owns is
+  a foreign key to `boat_type`, which also determines its cargo capacity.
+- `ship_inventory` — a ship's cargo, one row per (ship, resource).
+- `purchases` — cost-basis bookkeeping, one row per (ship, resource).
+
+On first run against an empty database, any legacy JSON saves under `data/`
+(`world.json` and `players/*.json`, the format used before the move to
+PostgreSQL) are imported automatically so existing progress carries over. The
+world seed is a fixed constant: every generated chunk and its ports are
+persisted, so the world is reconstructed entirely from the database.
 
 ## API
 
@@ -50,11 +66,19 @@ goods, unknown port/resource) return `400`.
 ```
 src/
   main.ts                bootstrap; enables CORS, listens on PORT (default 3000)
-  app.module.ts          root module
+  app.module.ts          root module; loads .env and the TypeORM/PostgreSQL connection
   game/
     game.controller.ts   HTTP routes under /game
     game.service.ts      economy rules, world generation, persistence
     game.types.ts        shared domain types, constants, world-gen helpers
+    entities/
+      world-chunk.entity.ts      an explored chunk of the world
+      port.entity.ts             a port and its per-resource prices
+      boat-type.entity.ts        the hull catalog (capacity, price)
+      boat-for-sale.entity.ts    hulls a port's shipyard sells (port ↔ boat type)
+      ship.entity.ts             a player's ship (owns a boat type)
+      ship-inventory.entity.ts   a ship's cargo (per resource)
+      purchase.entity.ts         cost-basis bookkeeping (per resource)
 ```
 
 ## Setup
@@ -62,6 +86,28 @@ src/
 ```bash
 npm install
 ```
+
+This backend stores game data in PostgreSQL. Provide a database and copy the
+example environment file, then fill in your connection details:
+
+```bash
+cp .env.example .env
+```
+
+`.env` holds the connection settings (it is gitignored):
+
+| Variable         | Description                                              |
+| ---------------- | -------------------------------------------------------- |
+| `DB_HOST`        | PostgreSQL host (e.g. `localhost`).                      |
+| `DB_PORT`        | PostgreSQL port (default `5432`).                        |
+| `DB_USER`        | Database user.                                           |
+| `DB_PASSWORD`    | Database password.                                       |
+| `DB_NAME`        | Database name.                                           |
+| `DB_SYNCHRONIZE` | `true` to auto-create/update tables on startup (dev).    |
+
+With `DB_SYNCHRONIZE=true` the `world` and `players` tables are created
+automatically the first time the server starts, so no manual migration is
+needed for local development.
 
 ## Run
 

@@ -49,12 +49,12 @@ export class GameController {
 
   // Identify the player behind this request. On first contact (no valid cookie)
   // we mint a new user and set the cookie so they're remembered from now on.
-  private resolveUser(req: Request, res: Response): string {
+  private async resolveUser(req: Request, res: Response): Promise<string> {
     let userId = this.cookieUser(req);
     if (!userId) {
       userId = randomUUID();
     }
-    this.game.ensureUser(userId);
+    await this.game.ensureUser(userId);
     // (Re)set the cookie on every request so its expiry keeps rolling forward.
     res.cookie(COOKIE_NAME, userId, {
       httpOnly: true,
@@ -66,30 +66,30 @@ export class GameController {
   }
 
   @Get('state')
-  getState(
+  async getState(
     @Req() req: Request,
     @Res({ passthrough: true }) res: Response,
-  ): GameState {
-    return this.game.getState(this.resolveUser(req, res));
+  ): Promise<GameState> {
+    return this.game.getState(await this.resolveUser(req, res));
   }
 
   @Post('move')
-  move(
+  async move(
     @Body() body: MoveDto,
     @Req() req: Request,
     @Res({ passthrough: true }) res: Response,
-  ): GameState {
-    return this.game.moveShip(this.resolveUser(req, res), body.x, body.y);
+  ): Promise<GameState> {
+    return this.game.moveShip(await this.resolveUser(req, res), body.x, body.y);
   }
 
   @Post('trade')
-  trade(
+  async trade(
     @Body() body: TradeDto,
     @Req() req: Request,
     @Res({ passthrough: true }) res: Response,
-  ): GameState {
+  ): Promise<GameState> {
     return this.game.trade(
-      this.resolveUser(req, res),
+      await this.resolveUser(req, res),
       body.portId,
       body.resource,
       body.quantity,
@@ -98,23 +98,23 @@ export class GameController {
   }
 
   @Post('buy-ship')
-  buyShip(
+  async buyShip(
     @Body() body: BuyShipDto,
     @Req() req: Request,
     @Res({ passthrough: true }) res: Response,
-  ): GameState {
+  ): Promise<GameState> {
     return this.game.buyShip(
-      this.resolveUser(req, res),
+      await this.resolveUser(req, res),
       body.portId,
       body.boatId,
     );
   }
 
   @Post('reset')
-  reset(
+  async reset(
     @Req() req: Request,
     @Res({ passthrough: true }) res: Response,
-  ): GameState {
-    return this.game.reset(this.resolveUser(req, res));
+  ): Promise<GameState> {
+    return this.game.reset(await this.resolveUser(req, res));
   }
 }
