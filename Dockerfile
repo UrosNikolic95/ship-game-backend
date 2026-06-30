@@ -23,5 +23,5 @@ COPY --from=build /app/dist ./dist
 # Run as the unprivileged user that the node image ships with.
 USER node
 
-EXPOSE 3000
+EXPOSE 3001
 CMD ["node", "dist/main"]
