@@ -36,7 +36,15 @@ const USER_ID_RE = /^[A-Za-z0-9-]{1,64}$/;
 // Real-time presence channel: every connected client streams its ship position
 // here, and the gateway relays each ship to all *other* players so everyone sees
 // everyone else sailing live. Runs on the same HTTP server as the REST API.
-@WebSocketGateway({ cors: { origin: true, credentials: true } })
+//
+// The Socket.IO endpoint lives under `/api/socket.io` (instead of the default
+// `/socket.io`) so that, in production, the same nginx rule that proxies `/api`
+// to this backend also covers the WebSocket traffic. The client sets a matching
+// `path` (see presence.service.ts).
+@WebSocketGateway({
+  path: '/api/socket.io',
+  cors: { origin: true, credentials: true },
+})
 export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect {
   private readonly logger = new Logger(GameGateway.name);
 
