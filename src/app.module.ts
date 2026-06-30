@@ -25,15 +25,7 @@ import { BoatForSaleEntity } from './game/entities/boat-for-sale.entity';
         username: config.get<string>('DB_USER'),
         password: config.get<string>('DB_PASSWORD'),
         database: config.get<string>('DB_NAME'),
-        entities: [
-          WorldChunkEntity,
-          PortEntity,
-          ShipEntity,
-          ShipInventoryEntity,
-          PurchaseEntity,
-          BoatTypeEntity,
-          BoatForSaleEntity,
-        ],
+        autoLoadEntities: true,
         // Auto-create/update tables on startup when DB_SYNCHRONIZE=true.
         synchronize: config.get<string>('DB_SYNCHRONIZE', 'false') === 'true',
       }),

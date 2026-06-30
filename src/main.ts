@@ -3,6 +3,7 @@ import { AppModule } from './app.module';
 
 async function bootstrap() {
   const app = await NestFactory.create(AppModule);
+  app.setGlobalPrefix('api');
   // Allow the Angular dev server (and any local origin) to call the API, and to
   // send/receive the session cookie. Credentialed CORS can't use a wildcard
   // origin, so we reflect the request's origin instead.
