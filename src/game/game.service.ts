@@ -90,6 +90,7 @@ export class GameService implements OnModuleInit {
   async onModuleInit(): Promise<void> {
     await this.seedBoatTypes();
     await this.importLegacyFilesIfEmpty();
+    await this.backfillPeakGold();
     const loaded = await this.loadWorld();
     if (loaded) {
       this.world = loaded;
@@ -114,6 +115,33 @@ export class GameService implements OnModuleInit {
 
   getState(userId: string): GameState {
     return this.viewFor(userId);
+  }
+
+  // Ship rows created before peak-gold tracking existed default their high-water
+  // mark to 0, which would keep every established player off the leaderboard
+  // until their next save. A player currently holding gold has, by definition,
+  // peaked at least that high — so seed the mark from current gold wherever it
+  // lags behind. Runs once at startup and is idempotent (afterwards every row
+  // has peakGold >= gold, so re-running changes nothing).
+  private async backfillPeakGold(): Promise<void> {
+    try {
+      const result = await this.shipRepo
+        .createQueryBuilder()
+        .update(ShipEntity)
+        .set({
+          peakGold: () => '"gold"',
+          peakGoldAt: () => 'COALESCE("peakGoldAt", now())',
+        })
+        .where('"peakGold" < "gold"')
+        .execute();
+      if (result.affected) {
+        this.logger.log(`Backfilled peak gold for ${result.affected} ship(s)`);
+      }
+    } catch (err) {
+      // Non-fatal: on a schema without the columns yet (synchronize off) the
+      // leaderboard simply stays empty rather than crashing startup.
+      this.logger.warn(`Peak-gold backfill skipped: ${String(err)}`);
+    }
   }
 
   // The richest players ever: the top peak-gold high-water marks across every
