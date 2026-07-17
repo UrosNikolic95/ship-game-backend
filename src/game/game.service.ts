@@ -107,6 +107,15 @@ export class GameService implements OnModuleInit {
     const loaded = await this.loadPlayer(userId);
     if (loaded) {
       this.players.set(userId, loaded);
+      // Self-heal: a row created before peak-gold tracking carries peakGold 0,
+      // which would leave this player off the leaderboard. They're holding gold
+      // now, so they've peaked at least that high — seed the mark on load (the
+      // startup pass does the same in bulk; this covers them even if that pass
+      // didn't run). savePlayer only writes when gold actually exceeds the mark.
+      const entity = this.shipEntities.get(userId);
+      if (entity && entity.peakGold < entity.gold) {
+        await this.savePlayer(userId);
+      }
     } else {
       this.players.set(userId, this.createPlayer());
       await this.savePlayer(userId);
