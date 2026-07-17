@@ -33,6 +33,16 @@ export class ShipEntity {
   @Column('int')
   gold: number;
 
+  // High-water mark: the most gold this player has ever held at once, and when
+  // they reached it. Only ever raised (see GameService.savePlayer), so it
+  // survives spending the gold again — and survives a reset, which starts the
+  // player over but keeps their row.
+  @Column('int', { default: 0 })
+  peakGold: number;
+
+  @Column('timestamptz', { nullable: true })
+  peakGoldAt: Date | null;
+
   // The hull this ship is; drives cargo capacity (see BoatTypeEntity). Eager so
   // it is always available when composing the game state.
   @ManyToOne(() => BoatTypeEntity, { eager: true })

@@ -69,6 +69,48 @@ export interface PurchaseStats {
   perResource: Record<Resource, { spent: number; quantity: number }>;
 }
 
+// One player's entry on the record board: the most gold they have ever held at
+// once, and when they reached it.
+export interface MoneyRecord {
+  userId: string;
+  name: string;
+  gold: number;
+  achievedAt: string | null;
+}
+
+// How many players the record board shows.
+export const RECORD_BOARD_SIZE = 10;
+
+// One row of the leaderboard: a player's rank, display name, and peak gold.
+// Deliberately does NOT carry the raw user id — that id is the player's session
+// cookie value, so it must never be handed to other clients. `isCurrentUser`
+// lets the requesting client highlight its own row without knowing any ids.
+export interface LeaderboardEntry {
+  rank: number;
+  name: string;
+  gold: number;
+  achievedAt: string | null;
+  isCurrentUser: boolean;
+}
+
+// The leaderboard as shown to one player: the top entries, plus that player's
+// own standing when they didn't make the top list (null when they're already in
+// `top` — flagged there via isCurrentUser — or aren't on the board at all).
+export interface Leaderboard {
+  top: LeaderboardEntry[];
+  currentUser: LeaderboardEntry | null;
+}
+
+// A short, stable display name derived from a user id, so players show up as
+// e.g. "Sailor 4F3A" rather than a raw UUID. Shared by the record board and the
+// live presence channel so a player is named the same way everywhere.
+export function displayNameFor(userId: string): string {
+  return `Sailor ${userId
+    .replace(/[^a-f0-9]/gi, '')
+    .slice(0, 4)
+    .toUpperCase()}`;
+}
+
 // One generated square of the infinite world. A chunk (cx, cy) covers the world
 // region [cx*CHUNK_SIZE, (cx+1)*CHUNK_SIZE) x [cy*CHUNK_SIZE, (cy+1)*CHUNK_SIZE).
 export interface ChunkCoord {

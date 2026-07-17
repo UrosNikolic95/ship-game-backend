@@ -2,7 +2,7 @@ import { Body, Controller, Get, Post, Req, Res } from '@nestjs/common';
 import type { Request, Response } from 'express';
 import { randomUUID } from 'crypto';
 import { GameService } from './game.service';
-import type { GameState, Resource } from './game.types';
+import type { GameState, Leaderboard, Resource } from './game.types';
 
 interface MoveDto {
   x: number;
@@ -71,6 +71,16 @@ export class GameController {
     @Res({ passthrough: true }) res: Response,
   ): Promise<GameState> {
     return this.game.getState(await this.resolveUser(req, res));
+  }
+
+  // Top-10 richest players, plus this player's own standing when they didn't
+  // make the list, so the client can show it separately below.
+  @Get('leaderboard')
+  async leaderboard(
+    @Req() req: Request,
+    @Res({ passthrough: true }) res: Response,
+  ): Promise<Leaderboard> {
+    return this.game.getLeaderboard(await this.resolveUser(req, res));
   }
 
   @Post('move')

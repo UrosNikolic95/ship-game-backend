@@ -17,11 +17,16 @@ import { BoatTypeEntity } from './entities/boat-type.entity';
 import { BoatForSaleEntity } from './entities/boat-for-sale.entity';
 import {
   GameState,
+  MoneyRecord,
+  Leaderboard,
+  LeaderboardEntry,
   World,
   Player,
   Port,
   Resource,
   RESOURCES,
+  RECORD_BOARD_SIZE,
+  displayNameFor,
   BOATS,
   buyPrice,
   sellPrice,
@@ -109,6 +114,89 @@ export class GameService implements OnModuleInit {
 
   getState(userId: string): GameState {
     return this.viewFor(userId);
+  }
+
+  // The richest players ever: the top peak-gold high-water marks across every
+  // player, best first. Ties go to whoever got there first. Read straight from
+  // the database rather than the in-memory players, so it covers everyone —
+  // including players who aren't currently loaded.
+  async getMoneyRecords(): Promise<MoneyRecord[]> {
+    // Hand-rolled query so the ship's eager cargo/purchase/boat relations aren't
+    // dragged along for rows we only need two columns of.
+    const rows = await this.shipRepo
+      .createQueryBuilder('ship')
+      .select(['ship.userId', 'ship.peakGold', 'ship.peakGoldAt'])
+      .where('ship.peakGold > 0')
+      .orderBy('ship.peakGold', 'DESC')
+      .addOrderBy('ship.peakGoldAt', 'ASC')
+      .take(RECORD_BOARD_SIZE)
+      .getMany();
+
+    return rows.map((r) => ({
+      userId: r.userId,
+      name: displayNameFor(r.userId),
+      gold: r.peakGold,
+      achievedAt: r.peakGoldAt ? r.peakGoldAt.toISOString() : null,
+    }));
+  }
+
+  // The leaderboard for a given player: the top RECORD_BOARD_SIZE richest
+  // players, plus — when this player didn't make that list — their own entry and
+  // rank so they can still see where they stand. `currentUser` is null when the
+  // player is already in `top` (their row there is flagged isCurrentUser), or
+  // hasn't earned a place on the board yet.
+  async getLeaderboard(userId: string): Promise<Leaderboard> {
+    const records = await this.getMoneyRecords();
+    const top: LeaderboardEntry[] = records.map((r, i) => ({
+      rank: i + 1,
+      name: r.name,
+      gold: r.gold,
+      achievedAt: r.achievedAt,
+      isCurrentUser: r.userId === userId,
+    }));
+
+    // Already on the board — highlighted in place, no separate row needed.
+    if (top.some((e) => e.isCurrentUser)) {
+      return { top, currentUser: null };
+    }
+
+    return { top, currentUser: await this.rankOf(userId) };
+  }
+
+  // This player's own leaderboard entry and rank, for when they aren't in the
+  // top list. Null when they haven't earned a place on the board (no ship saved
+  // yet, or they've never held any gold).
+  private async rankOf(userId: string): Promise<LeaderboardEntry | null> {
+    // QueryBuilder (rather than findOne) so the ship's eager relations aren't
+    // dragged along for the two columns we need.
+    const me = await this.shipRepo
+      .createQueryBuilder('ship')
+      .select(['ship.userId', 'ship.peakGold', 'ship.peakGoldAt'])
+      .where('ship.userId = :userId', { userId })
+      .getOne();
+    if (!me || me.peakGold <= 0) return null;
+
+    // Rank is one more than the number of players strictly ahead, using the same
+    // ordering as the board: more peak gold first, ties broken by who reached it
+    // first. (When this player's timestamp is missing we skip the tie-break.)
+    const aheadQuery = this.shipRepo
+      .createQueryBuilder('ship')
+      .where('ship.peakGold > :gold', { gold: me.peakGold });
+    if (me.peakGoldAt) {
+      aheadQuery.orWhere('ship.peakGold = :gold AND ship.peakGoldAt < :at', {
+        gold: me.peakGold,
+        at: me.peakGoldAt,
+      });
+    }
+    const ahead = await aheadQuery.getCount();
+
+    return {
+      rank: ahead + 1,
+      name: displayNameFor(me.userId),
+      gold: me.peakGold,
+      achievedAt: me.peakGoldAt ? me.peakGoldAt.toISOString() : null,
+      isCurrentUser: true,
+    };
   }
 
   // The player drives the ship client-side; we just persist where it ended up.
@@ -474,6 +562,8 @@ export class GameService implements OnModuleInit {
       x: player.ship.x,
       y: player.ship.y,
       gold: player.ship.gold,
+      peakGold: player.ship.gold,
+      peakGoldAt: new Date(),
       boatType: this.boatTypeFor(player.ship.boatId),
       inventory: RESOURCES.map(
         (r) => ({ resource: r, quantity: 0 }) as ShipInventoryEntity,
@@ -628,6 +718,14 @@ export class GameService implements OnModuleInit {
     entity.x = player.ship.x;
     entity.y = player.ship.y;
     entity.gold = player.ship.gold;
+    // Raise the high-water mark whenever the player is holding more gold than
+    // they ever have before. It is only ever raised — spending the gold back
+    // down, or a reset, leaves the peak (and when it was reached) untouched, so
+    // the record board reflects the best they've ever done.
+    if (player.ship.gold > entity.peakGold) {
+      entity.peakGold = player.ship.gold;
+      entity.peakGoldAt = new Date();
+    }
     entity.boatType = this.boatTypeFor(player.ship.boatId);
     for (const inv of entity.inventory) {
       inv.quantity = player.ship.cargo[inv.resource as Resource] ?? 0;

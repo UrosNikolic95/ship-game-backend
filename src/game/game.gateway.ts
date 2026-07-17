@@ -10,6 +10,7 @@ import {
 } from '@nestjs/websockets';
 import { randomUUID } from 'crypto';
 import type { Server, Socket } from 'socket.io';
+import { displayNameFor } from './game.types';
 
 // A live position broadcast for one player's ship. This is presence only —
 // ephemeral and never persisted (the authoritative ship position is still saved
@@ -109,7 +110,7 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect {
 
     const ship: ShipPresence = {
       id: userId,
-      name: this.nameFor(userId),
+      name: displayNameFor(userId),
       x: body.x,
       y: body.y,
       heading: typeof body.heading === 'number' ? body.heading : 0,
@@ -136,14 +137,5 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect {
       }
     }
     return randomUUID();
-  }
-
-  // A short, stable display name derived from the user id, so other players show
-  // up as e.g. "Sailor 4f3a" rather than a raw UUID.
-  private nameFor(userId: string): string {
-    return `Sailor ${userId
-      .replace(/[^a-f0-9]/gi, '')
-      .slice(0, 4)
-      .toUpperCase()}`;
   }
 }
